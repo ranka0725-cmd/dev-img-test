@@ -1,69 +1,65 @@
-# 1. 이름을 설정 
+# 1. 워크플로우의 이름 (GitHub Actions 탭에서 보이는 이름)
 name :  Nginx + node + Deployment 
 
-
-# 2. 엄무매뉴얼  동작 시점 설정 
+# 2. 동작 시점 설정: 어떤 이벤트가 발생했을 때 이 설명서를 실행할 것인가?
 on :
-    push:
-        branches : ["main"]
-    workflow_dispatch :
+  push:
+    branches : ["main"]  # main 브랜치에 코드가 push(업로드)될 때마다 실행
+  workflow_dispatch :      # 사용자가 GitHub 웹사이트에서 버튼을 눌러 수동으로도 실행 가능
 
-
-# 3. 엄무매뉴얼 응 더작은 단위를 쪼개서 , 해야할일을 작성 
+# 3. 실제 수행할 작업들 (jobs)
 jobs:
-  # 1) 프론트(React/Vite) 빌드 & Public(Nginx) 배포
-  # 
+  # [첫 번째 작업] 프론트엔드(React/Vite) 빌드 및 Nginx 서버 배포
   build-and-deploy-frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # GitHub이 제공하는 가상 환경(Ubuntu)에서 실행
     defaults:
       run:
         shell: bash
 
     steps:
-      # (1) 레포 체크아웃
+      # (1) 소스 코드 가져오기
       - name: Checkout
-        #  uses --〉 이미 잘 짜여진 코드를 가져와서 실행하겠다!
         uses: actions/checkout@v4
 
-      # (2) React 빌드용 Node 세팅
+      # (2) 빌드를 위한 Node.js 환경 세팅
       - name: Setup Node (for building React)
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          cache: "npm"
+          node-version: "22" # 최신 Node 22 버전 사용
+          cache: "npm"       # 패키지 설치 속도를 높이기 위해 캐시 사용
           cache-dependency-path: client/package-lock.json
 
-      # (3) React 빌드 -> client/dist 생성
+      # (3) React 프로젝트 빌드 (정적 파일 dist 생성)
       - name: Build React (client/dist)
         working-directory: client
         run: |
-          npm ci
-          npm run build
-          test -d dist
+          npm ci            # package-lock.json에 기록된 정확한 버전의 라이브러리 설치
+          npm run build     # 배포용 정적 파일 생성 (dist 폴더 생성)
+          test -d dist      # dist 폴더가 정상적으로 만들어졌는지 검사
 
-      # (4-0) Public 서버에 dist 업로드 받을 폴더 생성
+      # (4) Public 서버에 배포 폴더 준비 (SSH 접속)
       - name: Ensure web root exists on Public
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.PUBLIC_HOST }}
-          username: ${{ secrets.PUBLIC_USER }}
-          key: ${{ secrets.PUBLIC_SSH_KEY }}
+          host: ${{ secrets.PUBLIC_HOST }}      # 서버 IP
+          username: ${{ secrets.PUBLIC_USER }}  # 서버 계정
+          key: ${{ secrets.PUBLIC_SSH_KEY }}    # 서버 접속용 SSH 키
           script: |
-            sudo mkdir -p "/usr/share/nginx/html"
-            sudo chown -R $USER:$USER "/usr/share/nginx/html" || true
+            sudo mkdir -p "/usr/share/nginx/html"  # Nginx가 바라볼 폴더 생성
+            sudo chown -R $USER:$USER "/usr/share/nginx/html" || true # 권한 변경
 
-      # (4) dist를 Public 서버 Nginx root로 업로드
+      # (5) 빌드된 dist 폴더를 서버로 전송 (SCP 사용)
       - name: Upload dist to Public Server (Nginx web root)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.PUBLIC_HOST }}
           username: ${{ secrets.PUBLIC_USER }}
           key: ${{ secrets.PUBLIC_SSH_KEY }}
-          source: "client/dist/**"
-          target: "/usr/share/nginx/html"
-          strip_components: 2
+          source: "client/dist/**"             # 로컬의 dist 폴더 내용을
+          target: "/usr/share/nginx/html"      # 서버의 이 경로로 복사
+          strip_components: 2                  # 'client/dist' 경로를 제거하고 내용물만 복사
 
-      # (5) nginx 설정 검사 후 reload
+      # (6) Nginx 설정 적용
       - name: Reload Nginx on Public
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -71,11 +67,11 @@ jobs:
           username: ${{ secrets.PUBLIC_USER }}
           key: ${{ secrets.PUBLIC_SSH_KEY }}
           script: |
-            sudo nginx -t
-            sudo systemctl reload nginx
+            sudo nginx -t             # Nginx 설정 파일 문법 검사
+            sudo systemctl reload nginx # 설정을 실제로 반영 (무중단)
 
-
-  # 2) 백엔드(Node/PM2) Private 서버 배포 (Public을 Bastion으로 경유)
+  # [두 번째 작업] 백엔드(Node/PM2) Private 서버 배포
+  # needs 설정을 통해 프론트엔드 배포가 성공해야만 실행됩니다.
   deploy-backend:
     runs-on: ubuntu-latest
     needs: [build-and-deploy-frontend]
@@ -84,6 +80,7 @@ jobs:
         shell: bash
 
     steps:
+    # Public 서버를 경유하여(SSH 터널링 느낌) 내부망에 있는 Private 서버에 접속
     - name: Deploy backend to Private via Public (Bastion)
       uses: appleboy/ssh-action@v1.0.3
       with:
@@ -91,38 +88,39 @@ jobs:
         username: ${{ secrets.PUBLIC_USER }}
         key: ${{ secrets.PUBLIC_SSH_KEY }}
         script: |
-          set -e
+          set -e # 명령어 하나라도 실패하면 즉시 중단
 
-          # Public -> Private 접속
+          # Public 서버 터미널에서 Private 서버(10.10.20.6)로 다시 한 번 SSH 접속 시도
           ssh -o StrictHostKeyChecking=no root@10.10.20.6 "bash -lc '
             set -e
 
-            # (1) nvm 로드 (비로그인 쉘에서도 node/npm 사용 가능하게)
+            # (1) 서버의 Node.js 환경(nvm) 로드
             export NVM_DIR=\"\$HOME/.nvm\"
             [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"
 
-            # (2) 원하는 Node 버전 활성화
+            # (2) Node 활성화
             nvm use --lts
 
-            # (3) 레포 동기화
+            # (3) 서버 내부의 소스 코드 최신화 (Git)
             REPO_URL=\"${{ secrets.REPO_URL }}\"
             APP_DIR=\"${{ secrets.PRIVATE_APP_DIR }}\"
 
             if [ ! -d \"\$APP_DIR/.git\" ]; then
-              git clone \"\$REPO_URL\" \"\$APP_DIR\"
+              git clone \"\$REPO_URL\" \"\$APP_DIR\" # 폴더가 없으면 새로 복제
             fi
 
             cd \"\$APP_DIR\"
             git fetch --all
-            git reset --hard origin/main
+            git reset --hard origin/main # 로컬 변경사항 무시하고 원격의 최신 코드로 덮어쓰기
 
-            # (4) 백엔드 의존성 설치 + PM2 재기동
+            # (4) 서버 실행 (PM2 무중단 배포)
             cd \"\$APP_DIR/server\"
-            npm ci --omit=dev
+            npm ci --omit=dev # 배포에 불필요한 개발용 라이브러리는 제외하고 설치
 
+            # PM2 목록에 있으면 reload(재기동), 없으면 start(새로 시작)
             pm2 describe myproj-server >/dev/null 2>&1 \
               && pm2 reload myproj-server \
               || pm2 start server.js --name myproj-server
 
-            pm2 save
+            pm2 save # 서버 재부팅 시 자동 실행되도록 상태 저장
           '"
